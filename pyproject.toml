@@ -3,7 +3,7 @@ name = "fastapi-cloud-queues"
 version = "0.0.0"
 description = "FastAPI demo of laravel-cloud-queues from PyPI: a queue telemetry dashboard on the Redis backend."
 requires-python = ">=3.10"
-dependencies = ["laravel-cloud-queues[fastapi,redis]", "uvicorn"]
+dependencies = ["laravel-cloud-queues[fastapi,redis]>=0.1.1", "uvicorn"]
 
 [tool.uv]
 package = false
