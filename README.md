@@ -37,15 +37,19 @@ git switch main
 3. Set `LARAVEL_CLOUD_QUEUES_BACKEND=redis`.
 4. Leave the build command empty; Cloud installs dependencies with uv from `uv.lock`.
 5. Keep the start command Cloud pre-fills: `uvicorn 'main:app' --host '' --port $PORT`.
-6. Add workers, as background processes on the App cluster and/or a worker cluster:
+6. Create a worker cluster that runs the queue worker as **4 processes**, each with:
 
    ```sh
-   python -m laravel_cloud_queues.cli work main:app
+   laravel-cloud-queues work main:app
    ```
 
-   Set `WORKER_LABEL` (for example `app-cluster` or `worker-cluster`) on each so the
-   dashboard shows where each job ran. Run at least two workers: the timeout case exits the
-   worker that runs it.
+   The App cluster serves only the dashboard; it runs no workers. Keep the worker
+   cluster's instance count fixed so check runs are comparable across hardware changes.
+   Do not add `--stop-when-empty`: Cloud restarts any worker that exits.
+
+   With 4 processes the timeout case, which exits the worker that runs it, never stalls the
+   other cases. Each process shows on the dashboard as `hostname:pid`; a restarted worker
+   appears with a new pid. `WORKER_LABEL` overrides the hostname if you add more clusters.
 
 Protect the app at the network level; the dashboard and dispatch endpoints have no login.
 
