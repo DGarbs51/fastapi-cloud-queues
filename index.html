@@ -1,0 +1,220 @@
+<!doctype html>
+<html lang="en" class="h-full bg-slate-950">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Cloud Queues Telemetry</title>
+  <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+</head>
+<body class="h-full text-slate-200 antialiased">
+  <div class="mx-auto max-w-7xl px-6 py-10">
+    <header class="flex flex-wrap items-center justify-between gap-4">
+      <div>
+        <h1 class="text-2xl font-semibold text-white">Cloud Queues Telemetry</h1>
+        <p class="mt-1 text-sm text-slate-400">
+          <span id="framework">…</span> ·
+          laravel-cloud-queues <span id="version" class="font-mono text-slate-300">…</span> ·
+          redis queue <span id="queue" class="font-mono text-slate-300">…</span>
+        </p>
+      </div>
+      <div class="flex items-center gap-3 text-sm">
+        <span class="flex items-center gap-2 text-slate-400">
+          <span id="live-dot" class="size-2 rounded-full bg-slate-600"></span>
+          <span id="live-text">connecting</span>
+        </span>
+        <button data-reset class="rounded-md border border-slate-700 px-3 py-1.5 text-slate-300 hover:bg-slate-800">Reset stats</button>
+      </div>
+    </header>
+
+    <section class="mt-8">
+      <h2 class="text-xs font-medium uppercase tracking-wide text-slate-500">Queue depth</h2>
+      <div class="mt-3 grid grid-cols-1 gap-4 sm:grid-cols-3">
+        <div class="rounded-xl border border-slate-800 bg-slate-900 p-5">
+          <p class="text-sm text-slate-400">Ready</p>
+          <p id="depth-ready" class="mt-2 text-3xl font-semibold text-white">0</p>
+        </div>
+        <div class="rounded-xl border border-slate-800 bg-slate-900 p-5">
+          <p class="text-sm text-slate-400">Delayed / backing off</p>
+          <p id="depth-delayed" class="mt-2 text-3xl font-semibold text-white">0</p>
+        </div>
+        <div class="rounded-xl border border-slate-800 bg-slate-900 p-5">
+          <p class="text-sm text-slate-400">Reserved (in flight)</p>
+          <p id="depth-reserved" class="mt-2 text-3xl font-semibold text-white">0</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="mt-8">
+      <h2 class="text-xs font-medium uppercase tracking-wide text-slate-500">Totals</h2>
+      <div class="mt-3 grid grid-cols-2 gap-4 sm:grid-cols-5">
+        <div class="rounded-xl border border-slate-800 bg-slate-900 p-5">
+          <p class="text-sm text-slate-400">Queued</p>
+          <p id="count-queued" class="mt-2 text-2xl font-semibold text-slate-200">0</p>
+        </div>
+        <div class="rounded-xl border border-slate-800 bg-slate-900 p-5">
+          <p class="text-sm text-slate-400">Started</p>
+          <p id="count-started" class="mt-2 text-2xl font-semibold text-sky-400">0</p>
+        </div>
+        <div class="rounded-xl border border-slate-800 bg-slate-900 p-5">
+          <p class="text-sm text-slate-400">Processed</p>
+          <p id="count-processed" class="mt-2 text-2xl font-semibold text-emerald-400">0</p>
+        </div>
+        <div class="rounded-xl border border-slate-800 bg-slate-900 p-5">
+          <p class="text-sm text-slate-400">Released (retry)</p>
+          <p id="count-released" class="mt-2 text-2xl font-semibold text-amber-400">0</p>
+        </div>
+        <div class="rounded-xl border border-slate-800 bg-slate-900 p-5">
+          <p class="text-sm text-slate-400">Failed</p>
+          <p id="count-failed" class="mt-2 text-2xl font-semibold text-rose-400">0</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="mt-8">
+      <h2 class="text-xs font-medium uppercase tracking-wide text-slate-500">Dispatch</h2>
+      <div class="mt-3 flex flex-wrap gap-2">
+        <button data-kind="quick" class="rounded-md bg-indigo-600 px-3 py-2 text-sm font-medium text-white hover:bg-indigo-500">Quick job</button>
+        <button data-kind="async" class="rounded-md bg-indigo-600 px-3 py-2 text-sm font-medium text-white hover:bg-indigo-500">Async job</button>
+        <button data-kind="slow" class="rounded-md bg-indigo-600 px-3 py-2 text-sm font-medium text-white hover:bg-indigo-500">Slow job (3 s)</button>
+        <button data-kind="delayed" class="rounded-md bg-indigo-600 px-3 py-2 text-sm font-medium text-white hover:bg-indigo-500">Delayed (5 s)</button>
+        <button data-kind="flaky" class="rounded-md bg-amber-600 px-3 py-2 text-sm font-medium text-white hover:bg-amber-500">Flaky (retries once)</button>
+        <button data-kind="failing" class="rounded-md bg-rose-600 px-3 py-2 text-sm font-medium text-white hover:bg-rose-500">Always fails</button>
+        <button data-kind="burst" class="rounded-md bg-slate-700 px-3 py-2 text-sm font-medium text-white hover:bg-slate-600">Burst ×25</button>
+      </div>
+      <p id="flash" class="mt-2 h-5 text-sm text-slate-400"></p>
+    </section>
+
+    <section class="mt-8 grid grid-cols-1 gap-6 lg:grid-cols-4">
+      <div class="lg:col-span-3">
+        <h2 class="text-xs font-medium uppercase tracking-wide text-slate-500">Recent events</h2>
+        <div class="mt-3 overflow-hidden rounded-xl border border-slate-800">
+          <table class="w-full text-left text-sm">
+            <thead class="bg-slate-900 text-slate-400">
+              <tr>
+                <th class="px-4 py-2 font-medium">Time</th>
+                <th class="px-4 py-2 font-medium">Event</th>
+                <th class="px-4 py-2 font-medium">Job</th>
+                <th class="px-4 py-2 font-medium">UUID</th>
+                <th class="px-4 py-2 font-medium">Attempt</th>
+                <th class="px-4 py-2 font-medium">Duration</th>
+                <th class="px-4 py-2 font-medium">Detail</th>
+              </tr>
+            </thead>
+            <tbody id="events" class="divide-y divide-slate-800 bg-slate-950"></tbody>
+          </table>
+          <p id="empty" class="px-4 py-6 text-center text-sm text-slate-500">No events yet. Dispatch a job, and start a worker.</p>
+        </div>
+      </div>
+      <div>
+        <h2 class="text-xs font-medium uppercase tracking-wide text-slate-500">Workers (last 60 s)</h2>
+        <ul id="workers" class="mt-3 space-y-2 text-sm"></ul>
+        <p id="no-workers" class="mt-3 text-sm text-slate-500">No worker activity.</p>
+      </div>
+    </section>
+  </div>
+
+  <script>
+    const BADGE = {
+      queued: "bg-slate-700 text-slate-200",
+      started: "bg-sky-500/15 text-sky-300",
+      processed: "bg-emerald-500/15 text-emerald-300",
+      released: "bg-amber-500/15 text-amber-300",
+      failed: "bg-rose-500/15 text-rose-300",
+    };
+    const $ = (id) => document.getElementById(id);
+
+    function cell(text, cls = "") {
+      const td = document.createElement("td");
+      td.className = "px-4 py-2 " + cls;
+      td.textContent = text;
+      return td;
+    }
+
+    function row(e) {
+      const tr = document.createElement("tr");
+      tr.append(cell(new Date(e.at * 1000).toLocaleTimeString(), "whitespace-nowrap text-slate-400 tabular-nums"));
+      const badge = document.createElement("span");
+      badge.className = "rounded-full px-2 py-0.5 text-xs font-medium " + (BADGE[e.event] ?? "");
+      badge.textContent = e.event;
+      const td = cell("");
+      td.append(badge);
+      tr.append(td);
+      tr.append(cell(e.job ?? "", "font-mono text-slate-300"));
+      tr.append(cell((e.uuid ?? "").slice(0, 8), "font-mono text-slate-500"));
+      tr.append(cell(e.attempt ?? "", "tabular-nums"));
+      tr.append(cell(e.ms != null ? `${e.ms} ms` : "", "tabular-nums text-slate-400"));
+      const detail = e.error ?? (e.delay ? `delay ${e.delay}s` : e.worker ?? "");
+      tr.append(cell(detail, "truncate max-w-xs " + (e.error ? "text-rose-300" : "text-slate-500")));
+      return tr;
+    }
+
+    function render(s) {
+      $("framework").textContent = s.framework;
+      $("version").textContent = s.version;
+      $("queue").textContent = s.queue;
+      for (const k of ["ready", "delayed", "reserved"]) $(`depth-${k}`).textContent = s.depth[k];
+      for (const k of ["queued", "started", "processed", "released", "failed"]) $(`count-${k}`).textContent = s.counts[k] ?? 0;
+      $("events").replaceChildren(...s.events.map(row));
+      $("empty").hidden = s.events.length > 0;
+
+      const cutoff = Date.now() / 1000 - 60;
+      const workers = {};
+      for (const e of s.events) if (e.worker && e.at > cutoff) workers[e.worker] = (workers[e.worker] ?? 0) + 1;
+      $("workers").replaceChildren(...Object.entries(workers).map(([name, n]) => {
+        const li = document.createElement("li");
+        li.className = "flex justify-between rounded-lg border border-slate-800 bg-slate-900 px-3 py-2";
+        const label = document.createElement("span");
+        label.className = "font-mono text-slate-300";
+        label.textContent = name;
+        const count = document.createElement("span");
+        count.className = "text-slate-500 tabular-nums";
+        count.textContent = `${n} events`;
+        li.append(label, count);
+        return li;
+      }));
+      $("no-workers").hidden = Object.keys(workers).length > 0;
+    }
+
+    function live(ok) {
+      $("live-dot").className = "size-2 rounded-full " + (ok ? "bg-emerald-400 animate-pulse" : "bg-rose-500");
+      $("live-text").textContent = ok ? "live" : "disconnected";
+    }
+
+    async function poll() {
+      try {
+        const res = await fetch("/api/stats");
+        if (!res.ok) throw new Error(res.status);
+        render(await res.json());
+        live(true);
+      } catch {
+        live(false);
+      }
+      setTimeout(poll, 1000);
+    }
+
+    async function post(path) {
+      const res = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" } });
+      if (!res.ok) throw new Error(`${path} returned ${res.status}`);
+      return res.json();
+    }
+
+    document.addEventListener("click", async (ev) => {
+      const button = ev.target.closest("button");
+      if (!button) return;
+      try {
+        if (button.dataset.kind) {
+          const { uuids } = await post(`/api/dispatch/${button.dataset.kind}`);
+          $("flash").textContent = `Dispatched ${uuids.length} × ${button.dataset.kind}`;
+        } else if ("reset" in button.dataset) {
+          await post("/api/reset");
+          $("flash").textContent = "Stats reset";
+        }
+      } catch (err) {
+        $("flash").textContent = String(err);
+      }
+    });
+
+    poll();
+  </script>
+</body>
+</html>
