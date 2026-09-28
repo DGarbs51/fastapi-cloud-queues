@@ -1,15 +1,85 @@
 # fastapi-cloud-queues
 
 A FastAPI demo of [`laravel-cloud-queues`](https://pypi.org/project/laravel-cloud-queues/),
-installed from PyPI. The FastAPI app shows a live dashboard of jobs as they
-are queued and processed on the Redis (Valkey) backend.
+installed from PyPI. It proves the queue driver works on a Laravel Cloud deployment: a
+dashboard shows jobs as they are queued and processed, and **Run check** dispatches a fixed
+set of jobs and gives a pass/fail verdict for each, so the same check can be rerun after
+changing Python version, cluster size, instance type or cache.
 
-The plain-Python version with the same dashboard is
+The plain-Python version with the same dashboard and check is
 [`python-cloud-queues`](https://github.com/DGarbs51/python-cloud-queues).
 
-## Run it
+## Branches: one per Python version
 
-You need a Redis or Valkey server (Laravel Herd bundles Valkey on `127.0.0.1:6379`) and
+| Branch | Python |
+|---|---|
+| `python-3.10` | 3.10 |
+| `python-3.11` | 3.11 |
+| `python-3.12` | 3.12 |
+| `python-3.13` | 3.13 |
+| `python-3.14` | 3.14 |
+
+The branches differ from `main` only in `.python-version`, which Laravel Cloud reads to
+pick the runtime. Deploy each branch as its own application, with its own Valkey cache.
+Make changes on `main` and merge them into every branch:
+
+```sh
+for v in 3.10 3.11 3.12 3.13 3.14; do
+  git switch python-$v && git merge --no-edit main && git push
+done
+git switch main
+```
+
+## Deploy to Laravel Cloud
+
+1. Create an application from this repository and pick a `python-3.x` branch.
+2. Attach a Laravel Valkey cache. Cloud injects `REDIS_URL`.
+3. Set `LARAVEL_CLOUD_QUEUES_BACKEND=redis`.
+4. Leave the build command empty; Cloud installs dependencies with uv from `uv.lock`.
+5. Keep the start command Cloud pre-fills: `uvicorn 'main:app' --host '' --port $PORT`.
+6. Add workers, as background processes on the App cluster and/or a worker cluster:
+
+   ```sh
+   python -m laravel_cloud_queues.cli work main:app
+   ```
+
+   Set `WORKER_LABEL` (for example `app-cluster` or `worker-cluster`) on each so the
+   dashboard shows where each job ran. Run at least two workers: the timeout case exits the
+   worker that runs it.
+
+Protect the app at the network level; the dashboard and dispatch endpoints have no login.
+
+## Run check
+
+The check dispatches one job per case and polls what the workers recorded:
+
+| Case | Passes when |
+|---|---|
+| `quick` | a sync job is processed on attempt 1 |
+| `async` | an async job is processed on attempt 1 |
+| `delayed` | a job dispatched with a 5 s delay starts at least 5 s later |
+| `flaky` | a job that fails once is released, then processed on attempt 2 |
+| `failing` | a job that always fails is released, then failed on attempt 2 |
+| `timeout` | a job over its 3 s timeout exits the worker (exit 124), the platform restarts it, and the job is redelivered after the 60 s Redis lease |
+| `burst` | 20 jobs are each processed exactly once |
+| `workers` | at least one worker ran, and every worker runs the same Python version as the web process |
+
+A full run takes one to two minutes because of the timeout case. A case still waiting after
+240 s fails.
+
+## What the dashboard shows
+
+- **Queue depth**: ready, delayed (including retry backoff) and reserved (in-flight) jobs,
+  read from the package's Redis keys. Shown in `redis` mode only.
+- **Totals and recent events**: `queued`, `started`, `processed`, `released` and `failed`.
+  Outside managed mode the package emits no lifecycle events, so each job records its own
+  telemetry into Valkey (`lcq-demo:*`) using `current_job()`. The store falls back to
+  `REDIS_URL` in other modes, so the dashboard keeps working after a switch to managed queues.
+- **Workers**: worker label, process and Python version for the last minute.
+
+## Run locally
+
+You need Redis or Valkey (Laravel Herd bundles Valkey on `127.0.0.1:6379`) and
 [uv](https://docs.astral.sh/uv/).
 
 ```sh
@@ -21,23 +91,12 @@ uv run uvicorn main:app                     # dashboard on http://127.0.0.1:8000
 uv run laravel-cloud-queues work main:app   # in a second terminal; run more to scale
 ```
 
-Pass `--host` and `--port` to uvicorn to change where the dashboard listens.
-
-## What the dashboard shows
-
-- **Queue depth**: ready, delayed (including retry backoff) and reserved (in-flight) jobs,
-  read from the package's Redis keys.
-- **Totals and recent events**: `queued`, `started`, `processed`, `released` and `failed`.
-  In `redis` mode the package emits no lifecycle events of its own, so each job records
-  its telemetry into Redis (`lcq-demo:*`) using `current_job()`.
-- **Workers**: which worker processes handled jobs in the last minute.
-
-The dispatch buttons cover a quick sync job, an async job, a 3-second job, a 5-second
-delay, a job that fails once and is retried, a job that always fails, and a burst of 25.
+Locally nothing restarts a worker that exits, so the `timeout` case only passes with a
+restart loop: `while true; do uv run laravel-cloud-queues work main:app; done`.
 
 ## Files
 
-- `main.py`: the FastAPI app, `LaravelCloudQueues`, the jobs, their telemetry and the routes.
+- `main.py`: the FastAPI app, `LaravelCloudQueues`, the jobs and the routes.
+- `telemetry.py`: job telemetry, dashboard data and the check. Identical in both demo
+  repositories; keep them in sync.
 - `index.html`: the dashboard (Tailwind CSS from the CDN, no build step).
-
-The dispatch endpoints have no authentication. Run this locally, not on a public host.

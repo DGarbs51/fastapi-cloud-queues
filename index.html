@@ -12,9 +12,10 @@
       <div>
         <h1 class="text-2xl font-semibold text-white">Cloud Queues Telemetry</h1>
         <p class="mt-1 text-sm text-slate-400">
-          <span id="framework">…</span> ·
+          <span id="framework">…</span> on Python <span id="python" class="font-mono text-slate-300">…</span> ·
           laravel-cloud-queues <span id="version" class="font-mono text-slate-300">…</span> ·
-          redis queue <span id="queue" class="font-mono text-slate-300">…</span>
+          <span id="mode" class="font-mono text-slate-300">…</span> mode
+          <span id="queue-label">· queue <span id="queue" class="font-mono text-slate-300">…</span></span>
         </p>
       </div>
       <div class="flex items-center gap-3 text-sm">
@@ -27,6 +28,28 @@
     </header>
 
     <section class="mt-8">
+      <div class="flex items-center justify-between">
+        <h2 class="text-xs font-medium uppercase tracking-wide text-slate-500">Deployment check</h2>
+        <button data-check class="rounded-md bg-emerald-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-emerald-500">Run check</button>
+      </div>
+      <div class="mt-3 rounded-xl border border-slate-800 bg-slate-900 p-5">
+        <p id="check-empty" class="text-sm text-slate-500">
+          Runs every case below and checks each outcome. The timeout case exits a worker and
+          waits for the platform to restart it and redeliver, so a full run takes one to two minutes.
+        </p>
+        <div id="check" hidden>
+          <p class="flex items-center gap-3 text-sm">
+            <span id="check-status" class="rounded-full px-2.5 py-0.5 text-xs font-semibold uppercase"></span>
+            <span id="check-started" class="text-slate-400"></span>
+          </p>
+          <table class="mt-4 w-full text-left text-sm">
+            <tbody id="check-results" class="divide-y divide-slate-800"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <section id="depth-section" class="mt-8">
       <h2 class="text-xs font-medium uppercase tracking-wide text-slate-500">Queue depth</h2>
       <div class="mt-3 grid grid-cols-1 gap-4 sm:grid-cols-3">
         <div class="rounded-xl border border-slate-800 bg-slate-900 p-5">
@@ -79,7 +102,8 @@
         <button data-kind="delayed" class="rounded-md bg-indigo-600 px-3 py-2 text-sm font-medium text-white hover:bg-indigo-500">Delayed (5 s)</button>
         <button data-kind="flaky" class="rounded-md bg-amber-600 px-3 py-2 text-sm font-medium text-white hover:bg-amber-500">Flaky (retries once)</button>
         <button data-kind="failing" class="rounded-md bg-rose-600 px-3 py-2 text-sm font-medium text-white hover:bg-rose-500">Always fails</button>
-        <button data-kind="burst" class="rounded-md bg-slate-700 px-3 py-2 text-sm font-medium text-white hover:bg-slate-600">Burst ×25</button>
+        <button data-kind="timeout" class="rounded-md bg-rose-600 px-3 py-2 text-sm font-medium text-white hover:bg-rose-500">Times out (exits worker)</button>
+        <button data-kind="burst" class="rounded-md bg-slate-700 px-3 py-2 text-sm font-medium text-white hover:bg-slate-600">Burst ×20</button>
       </div>
       <p id="flash" class="mt-2 h-5 text-sm text-slate-400"></p>
     </section>
@@ -122,6 +146,11 @@
       failed: "bg-rose-500/15 text-rose-300",
     };
     const $ = (id) => document.getElementById(id);
+    const VERDICT = {
+      pass: ["pass", "bg-emerald-500/15 text-emerald-300"],
+      fail: ["fail", "bg-rose-500/15 text-rose-300"],
+      running: ["running", "bg-sky-500/15 text-sky-300"],
+    };
 
     function cell(text, cls = "") {
       const td = document.createElement("td");
@@ -150,16 +179,21 @@
 
     function render(s) {
       $("framework").textContent = s.framework;
+      $("python").textContent = s.python;
       $("version").textContent = s.version;
+      $("mode").textContent = s.mode;
       $("queue").textContent = s.queue;
-      for (const k of ["ready", "delayed", "reserved"]) $(`depth-${k}`).textContent = s.depth[k];
+      $("queue-label").hidden = !s.queue;
+      $("depth-section").hidden = !s.depth;
+      if (s.depth) for (const k of ["ready", "delayed", "reserved"]) $(`depth-${k}`).textContent = s.depth[k];
+      renderCheck(s.check);
       for (const k of ["queued", "started", "processed", "released", "failed"]) $(`count-${k}`).textContent = s.counts[k] ?? 0;
       $("events").replaceChildren(...s.events.map(row));
       $("empty").hidden = s.events.length > 0;
 
       const cutoff = Date.now() / 1000 - 60;
       const workers = {};
-      for (const e of s.events) if (e.worker && e.at > cutoff) workers[e.worker] = (workers[e.worker] ?? 0) + 1;
+      for (const e of s.events) if (e.worker && e.at > cutoff) { const k = `${e.worker} · Py ${e.python}`; workers[k] = (workers[k] ?? 0) + 1; }
       $("workers").replaceChildren(...Object.entries(workers).map(([name, n]) => {
         const li = document.createElement("li");
         li.className = "flex justify-between rounded-lg border border-slate-800 bg-slate-900 px-3 py-2";
@@ -173,6 +207,27 @@
         return li;
       }));
       $("no-workers").hidden = Object.keys(workers).length > 0;
+    }
+
+    function renderCheck(check) {
+      $("check").hidden = !check;
+      $("check-empty").hidden = !!check;
+      if (!check) return;
+      const [label, cls] = VERDICT[check.status];
+      $("check-status").className = "rounded-full px-2.5 py-0.5 text-xs font-semibold uppercase " + cls;
+      $("check-status").textContent = label;
+      $("check-started").textContent = `started ${new Date(check.started_at * 1000).toLocaleTimeString()}`;
+      $("check-results").replaceChildren(...check.results.map((r) => {
+        const tr = document.createElement("tr");
+        const [text, badgeCls] = VERDICT[r.ok === true ? "pass" : r.ok === false ? "fail" : "running"];
+        const badge = document.createElement("span");
+        badge.className = "rounded-full px-2 py-0.5 text-xs font-medium " + badgeCls;
+        badge.textContent = text;
+        const td = cell("", "w-24");
+        td.append(badge);
+        tr.append(cell(r.case, "w-32 font-mono text-slate-300"), td, cell(r.detail, "text-slate-400"));
+        return tr;
+      }));
     }
 
     function live(ok) {
@@ -205,6 +260,9 @@
         if (button.dataset.kind) {
           const { uuids } = await post(`/api/dispatch/${button.dataset.kind}`);
           $("flash").textContent = `Dispatched ${uuids.length} × ${button.dataset.kind}`;
+        } else if ("check" in button.dataset) {
+          await post("/api/check");
+          $("flash").textContent = "Check started";
         } else if ("reset" in button.dataset) {
           await post("/api/reset");
           $("flash").textContent = "Stats reset";
