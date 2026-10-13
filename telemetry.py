@@ -2,12 +2,14 @@
 fastapi-cloud-queues; keep the two copies in sync.
 
 The package emits no lifecycle events outside managed mode, so jobs record their own
-events into the environment's Valkey under ``lcq-demo:``. In ``redis`` mode queue depth
-comes from the package's Redis keys; in other modes depth is not shown.
+events into the environment's Valkey under DEMO_KEY_PREFIX (default ``lcq-demo:``).
+In ``redis`` mode queue depth comes from the package's Redis keys; in other modes
+depth is not shown.
 """
 
 from __future__ import annotations
 
+import asyncio
 import functools
 import json
 import os
@@ -18,13 +20,16 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 
 import redis
+import redis.asyncio
 
-from laravel_cloud_queues import Registry, __version__, current_job
+from laravel_cloud_queues import ConfigurationError, Registry, __version__, current_job
 
-EVENTS = "lcq-demo:events"
-STATS = "lcq-demo:stats"
-CHECK = "lcq-demo:check"
-JOB = "lcq-demo:job:"
+KEY_PREFIX = os.environ.get("DEMO_KEY_PREFIX", "lcq-demo:")
+EVENTS = KEY_PREFIX + "events"
+STATS = KEY_PREFIX + "stats"
+CHECK = KEY_PREFIX + "check"
+JOB = KEY_PREFIX + "job:"
+TIMEOUT = 5
 KEEP_EVENTS = 200
 JOB_TTL = 86_400
 CHECK_DEADLINE = 240  # the timeout case needs a worker restart plus the 60 s Redis lease
@@ -42,18 +47,60 @@ class Telemetry:
     def __init__(self, registry: Registry, framework: str) -> None:
         self.registry = registry
         self.framework = framework
+        self._astore: redis.asyncio.Redis | None = None
+
+    def _url(self) -> str | None:
+        config = self.registry.config.redis
+        return config.url if config else os.environ.get("REDIS_URL")
 
     @functools.cached_property
     def store(self) -> redis.Redis:
-        config = self.registry.config.redis
-        url = config.url if config else os.environ.get("REDIS_URL")
+        url = self._url()
         if not url:
             raise RuntimeError("Attach a Valkey cache (REDIS_URL) to store demo telemetry.")
-        return redis.Redis.from_url(url, decode_responses=True)
+        # Timeouts bound a stalled Valkey: async jobs call this on the worker's loop, where a hang would stop the
+        # lease renewer (laravel-cloud-queues renews async handlers from a task, not a thread).
+        return redis.Redis.from_url(url, decode_responses=True, socket_connect_timeout=TIMEOUT, socket_timeout=TIMEOUT)
+
+    async def aopen(self) -> None:
+        """Create the request-loop client; apps can boot without an attached cache."""
+        try:
+            url = self._url()
+        except ConfigurationError:
+            if (os.environ.get("LARAVEL_CLOUD_QUEUES_BACKEND") is not None
+                    or os.environ.get("LARAVEL_CLOUD_MANAGED_QUEUES_CONFIG") is not None):
+                raise
+            # Telemetry is optional when booting without a queue backend.
+            url = os.environ.get("REDIS_URL")
+        if url and self._astore is None:
+            max_connections = int(os.environ.get("REDIS_MAX_CONNECTIONS", "50"))
+            if max_connections < 1:
+                raise ValueError("REDIS_MAX_CONNECTIONS must be positive")
+            self._astore = redis.asyncio.Redis.from_url(
+                url, decode_responses=True,
+                max_connections=max_connections,
+                socket_connect_timeout=TIMEOUT, socket_timeout=TIMEOUT,
+            )
+
+    async def aclose(self) -> None:
+        if self._astore is not None:
+            async with asyncio.timeout(TIMEOUT):
+                await self._astore.aclose()
+            self._astore = None
+
+    @property
+    def astore(self) -> redis.asyncio.Redis:
+        if self._astore is None:
+            raise RuntimeError("Async demo telemetry needs REDIS_URL and aopen() in ASGI lifespan.")
+        return self._astore
 
     def record(self, event: str, **fields: object) -> None:
-        entry = json.dumps({"event": event, "at": time.time(), **fields})
         pipe = self.store.pipeline()
+        self._record(pipe, event, **fields)
+        pipe.execute()
+
+    def _record(self, pipe, event: str, **fields: object) -> None:
+        entry = json.dumps({"event": event, "at": time.time(), **fields})
         pipe.lpush(EVENTS, entry)
         pipe.ltrim(EVENTS, 0, KEEP_EVENTS - 1)
         pipe.hincrby(STATS, event, 1)
@@ -61,7 +108,6 @@ class Telemetry:
             key = f"{JOB}{fields['uuid']}"
             pipe.rpush(key, entry)
             pipe.expire(key, JOB_TTL)
-        pipe.execute()
 
     @contextmanager
     def tracked(self) -> Iterator[None]:
@@ -88,9 +134,25 @@ class Telemetry:
     def queued(self, job_name: str, uuid: str, at: float, delay: int) -> None:
         self.record("queued", at=at, job=job_name, uuid=uuid, delay=delay)
 
+    async def aqueued(self, job_name: str, uuid: str, at: float, delay: int) -> None:
+        pipe = self.astore.pipeline()
+        self._record(pipe, "queued", at=at, job=job_name, uuid=uuid, delay=delay)
+        async with asyncio.timeout(TIMEOUT):
+            await pipe.execute()
+
     def snapshot(self) -> dict[str, object]:
+        pipe = self._snapshot_pipeline(self.store)
+        return self._snapshot(pipe.execute(), self.evaluate())
+
+    async def asnapshot(self) -> dict[str, object]:
+        pipe = self._snapshot_pipeline(self.astore)
+        async with asyncio.timeout(TIMEOUT):
+            values = await pipe.execute()
+        return self._snapshot(values, await self.aevaluate())
+
+    def _snapshot_pipeline(self, store):
         config = self.registry.config
-        pipe = self.store.pipeline()
+        pipe = store.pipeline()
         if config.redis:
             pending = f"{config.redis.prefix}queues:{config.redis.queue}"
             pipe.llen(pending)
@@ -98,7 +160,11 @@ class Telemetry:
             pipe.zcard(f"{pending}:reserved")
         pipe.hgetall(STATS)
         pipe.lrange(EVENTS, 0, 99)
-        *depth, counts, events = pipe.execute()
+        return pipe
+
+    def _snapshot(self, values, check: dict[str, object] | None) -> dict[str, object]:
+        config = self.registry.config
+        *depth, counts, events = values
         parsed = sorted((json.loads(e) for e in events), key=lambda e: e["at"], reverse=True)
         return {
             "framework": self.framework,
@@ -109,26 +175,52 @@ class Telemetry:
             "depth": dict(zip(("ready", "delayed", "reserved"), depth)) if depth else None,
             "counts": {k: int(v) for k, v in counts.items()},
             "events": parsed,
-            "check": self.evaluate(),
+            "check": check,
         }
 
     def reset(self) -> None:
         self.store.delete(EVENTS, STATS, CHECK)
 
+    async def areset(self) -> None:
+        async with asyncio.timeout(TIMEOUT):
+            await self.astore.delete(EVENTS, STATS, CHECK)
+
     def save_check(self, cases: dict[str, list[str]]) -> None:
         self.store.set(CHECK, json.dumps({"at": time.time(), "cases": cases}))
+
+    async def asave_check(self, cases: dict[str, list[str]]) -> None:
+        async with asyncio.timeout(TIMEOUT):
+            await self.astore.set(CHECK, json.dumps({"at": time.time(), "cases": cases}))
 
     def evaluate(self) -> dict[str, object] | None:
         raw = self.store.get(CHECK)
         if raw is None:
             return None
         run = json.loads(raw)
-        expired = time.time() - run["at"] > CHECK_DEADLINE
-        pipe = self.store.pipeline()
+        pipe = self._check_pipeline(self.store, run)
+        return self._evaluate(run, pipe.execute())
+
+    async def aevaluate(self) -> dict[str, object] | None:
+        async with asyncio.timeout(TIMEOUT):
+            raw = await self.astore.get(CHECK)
+        if raw is None:
+            return None
+        run = json.loads(raw)
+        pipe = self._check_pipeline(self.astore, run)
+        async with asyncio.timeout(TIMEOUT):
+            histories = await pipe.execute()
+        return self._evaluate(run, histories)
+
+    def _check_pipeline(self, store, run):
+        pipe = store.pipeline()
         for uuids in run["cases"].values():
             for uuid in uuids:
                 pipe.lrange(f"{JOB}{uuid}", 0, -1)
-        histories = iter([[json.loads(e) for e in h] for h in pipe.execute()])
+        return pipe
+
+    def _evaluate(self, run, histories) -> dict[str, object]:
+        expired = time.time() - run["at"] > CHECK_DEADLINE
+        histories = iter([[json.loads(e) for e in h] for h in histories])
 
         results, seen = [], []
         for kind, uuids in run["cases"].items():
