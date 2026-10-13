@@ -1,9 +1,28 @@
 [project]
 name = "fastapi-cloud-queues"
 version = "0.0.0"
-description = "FastAPI demo of laravel-cloud-queues from PyPI: a queue telemetry dashboard on the Redis backend."
-requires-python = ">=3.10"
-dependencies = ["laravel-cloud-queues[fastapi,redis]>=0.1.1", "uvicorn"]
+description = "FastAPI app that checks Python and queues on Laravel Cloud."
+requires-python = ">=3.11"
+dependencies = [
+    "laravel-cloud-queues[redis]>=0.5.0",
+    "fastapi>=0.121",
+    "pymysql",
+    "certifi",
+    "uvicorn[standard]",
+    "laravel-cloud-logging==0.4.0",
+    "psycopg[binary]>=3.3.6",
+    "websockets>=16.1.1",
+    "granian>=2.8.4",
+    "hypercorn[uvloop]>=0.18.0",
+    "daphne>=4.2.3",
+    "psycopg-pool>=3.3.3",
+    "asyncmy>=0.2.16",
+    "httpx>=0.28.1",
+]
 
 [tool.uv]
 package = false
+
+# Managed workers run `laravel-cloud-queues work` without a CLI target.
+[tool.laravel-cloud-queues]
+target = "app:queues"
